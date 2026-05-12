@@ -1,0 +1,6 @@
+{
+    "min_length": 12,
+    "require_special_char": true,
+    "require_numbers": true,
+    "hmac_secret_key": "COMMUNICATION_LTD_SECRET_KEY_2026"
+}
