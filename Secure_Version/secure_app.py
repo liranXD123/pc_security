@@ -6,6 +6,7 @@ import hmac
 import hashlib
 import html
 import os
+import secrets
 
 app = Flask(__name__)
 app.secret_key = "super_secure_communication_ltd_2026"
@@ -41,7 +42,7 @@ def hash_password_hmac(password, salt=None):
     return pw_hash, salt
 
 
-# --- עטיפת HTML מודרנית מימין לשמאל (RTL) ---
+# --- עטיפת HTML מודרנית (RTL) ---
 def wrap_html(content):
     return f'''
     <!DOCTYPE html>
@@ -82,7 +83,7 @@ def init_db():
     conn = get_db_connection()
     conn.execute('''CREATE TABLE IF NOT EXISTS users 
                     (id INTEGER PRIMARY KEY, username TEXT UNIQUE, email TEXT, 
-                     password_hash TEXT, salt TEXT, failed_attempts INTEGER DEFAULT 0)''')
+                     password_hash TEXT, salt TEXT, failed_attempts INTEGER DEFAULT 0, reset_token TEXT)''')
     conn.execute('''CREATE TABLE IF NOT EXISTS customers 
                     (id INTEGER PRIMARY KEY, name TEXT)''')
     conn.commit()
@@ -96,22 +97,17 @@ def index():
     return redirect(url_for('login'))
 
 
-# 1. הרשמה (עם שמירת נתונים ל-UX חלקה והגנת Reflected XSS)
 @app.route('/register', methods=['GET', 'POST'])
 def register():
     error = ""
-    # משתנים לשמירת הקלט של המשתמש במקרה של שגיאה
     saved_username = ""
     saved_email = ""
 
     if request.method == 'POST':
-        # שמירת הנתונים וקידודם כדי למנוע Reflected XSS
         saved_username = html.escape(request.form['username'])
         saved_email = html.escape(request.form['email'])
-
         password = request.form['password']
 
-        # אימות סיסמה מול קובץ config
         valid, msg = validate_password(password)
         if not valid:
             error = f'<div class="alert">{msg}</div>'
@@ -119,7 +115,6 @@ def register():
             pw_hash, salt = hash_password_hmac(password)
             try:
                 conn = get_db_connection()
-                # תקין ומוגן נגד SQL Injection
                 conn.execute('INSERT INTO users (username, email, password_hash, salt) VALUES (?, ?, ?, ?)',
                              (request.form['username'], request.form['email'], pw_hash, salt))
                 conn.commit()
@@ -129,7 +124,6 @@ def register():
             except sqlite3.IntegrityError:
                 error = '<div class="alert">שם המשתמש כבר קיים במערכת.</div>'
 
-    # השדות מתמלאים אוטומטית בערכים שנשמרו (אם ישנם)
     content = f'''
         <h2>יצירת חשבון מאובטח</h2>
         {error}
@@ -143,7 +137,7 @@ def register():
     '''
     return wrap_html(content)
 
-# 2. התחברות (מוגן SQLi ומנגנון נעילה לאחר 3 ניסיונות)
+
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     error = ""
@@ -153,7 +147,6 @@ def login():
         config = load_config()
 
         conn = get_db_connection()
-        # מוגן SQL Injection! (שימוש ב-?)
         user = conn.execute('SELECT * FROM users WHERE username = ?', (username,)).fetchone()
 
         if user:
@@ -162,7 +155,6 @@ def login():
             else:
                 check_hash, _ = hash_password_hmac(password, user['salt'])
                 if check_hash == user['password_hash']:
-                    # איפוס ספירת ניסיונות כושלים בהתחברות מוצלחת
                     conn.execute('UPDATE users SET failed_attempts = 0 WHERE id = ?', (user['id'],))
                     conn.commit()
                     session['user_id'] = user['id']
@@ -170,7 +162,6 @@ def login():
                     conn.close()
                     return redirect(url_for('system_screen'))
                 else:
-                    # העלאת ספירת הניסיונות הכושלים
                     conn.execute('UPDATE users SET failed_attempts = failed_attempts + 1 WHERE id = ?', (user['id'],))
                     conn.commit()
                     error = '<div class="alert">שם משתמש או סיסמה שגויים.</div>'
@@ -186,30 +177,32 @@ def login():
             <input name="password" type="password" placeholder="סיסמה" required>
             <button type="submit">התחבר</button>
         </form>
+        <p style="text-align:center; margin-top:15px;"><a href="/forgot-password">שכחת סיסמה?</a></p>
         <p style="text-align:center; margin-top:15px;">אין לך חשבון? <a href="/register">צור חשבון חדש</a></p>
     '''
     return wrap_html(content)
 
 
-# 3. מסך המערכת (מוגן Stored XSS)
 @app.route('/system', methods=['GET', 'POST'])
 def system_screen():
     if 'user_id' not in session:
         return redirect(url_for('login'))
 
-    last_added = ""
-    conn = get_db_connection()
+    # פיצ'ר חסימה מאובטח: מונע לחלוטין הוספת לקוח נוסף ומעביר ישר לסיכום
+    if session.get('customer_added'):
+        return redirect(url_for('success_screen'))
 
+    conn = get_db_connection()
     if request.method == 'POST':
         raw_cust_name = request.form['customer_name']
+        safe_cust_name = html.escape(raw_cust_name)  # SECURE: XSS Protection
 
-        # מוגן Stored XSS! קידוד תווים מיוחדים לפני הכנסה והצגה
-        safe_cust_name = html.escape(raw_cust_name)
-
-        # מוגן SQLi
-        conn.execute('INSERT INTO customers (name) VALUES (?)', (safe_cust_name,))
+        conn.execute('INSERT INTO customers (name) VALUES (?)', (safe_cust_name,))  # SECURE: Parameterized Query
         conn.commit()
-        last_added = f'<h3 style="color:#10b981; text-align:center;">לקוח אחרון שהתווסף: {safe_cust_name}</h3>'
+        conn.close()
+
+        session['customer_added'] = True
+        return redirect(url_for('success_screen'))
 
     content = f'''
         <h2>לוח בקרה - Communication_LTD</h2>
@@ -218,13 +211,142 @@ def system_screen():
             <input name="customer_name" placeholder="שם הלקוח המלא" required>
             <button type="submit">הוסף לקוח</button>
         </form>
-        {last_added}
         <div style="text-align:center; margin-top: 30px;">
-            <a href="/logout">התנתק מהמערכת</a>
+            <a href="/change-password">שינוי סיסמה</a> | <a href="/logout">התנתק</a>
         </div>
     '''
     conn.close()
     return wrap_html(content)
+
+
+# --- מסך הבחירה החדש לאחר הוספה (גרסה מאובטחת - מוגן מפני XSS) ---
+@app.route('/success')
+def success_screen():
+    if 'user_id' not in session: return redirect(url_for('login'))
+
+    conn = get_db_connection()
+    customer = conn.execute('SELECT * FROM customers ORDER BY id DESC LIMIT 1').fetchone()
+    conn.close()
+
+    cust_name = customer['name'] if customer else "אין לקוחות"
+
+    content = f'''
+        <h2>הלקוח נרשם בהצלחה!</h2>
+        <div style="background:rgba(16,185,129,0.1); border:1px solid #10b981; padding:15px; border-radius:8px; text-align:center; margin:20px 0;">
+            <span style="color:#10b981; font-weight:bold;">שם הלקוח הרשום (מאובטח): {cust_name}</span>
+        </div>
+        <div style="text-align:center; margin-top: 20px;">
+            <a href="/change-password">שינוי סיסמה</a> | <a href="/logout">התנתק מהמערכת</a>
+        </div>
+    '''
+    return wrap_html(content)
+
+
+@app.route('/change-password', methods=['GET', 'POST'])
+def change_password():
+    if 'user_id' not in session: return redirect(url_for('login'))
+    error = ""
+
+    if request.method == 'POST':
+        old_password = request.form['old_password']
+        new_password = request.form['new_password']
+
+        conn = get_db_connection()
+        user = conn.execute('SELECT * FROM users WHERE id = ?', (session['user_id'],)).fetchone()
+
+        check_hash, _ = hash_password_hmac(old_password, user['salt'])
+        if check_hash != user['password_hash']:
+            error = '<div class="alert">הסיסמה הנוכחית שגויה.</div>'
+        else:
+            valid, msg = validate_password(new_password)
+            if not valid:
+                error = f'<div class="alert">{msg}</div>'
+            else:
+                new_hash, new_salt = hash_password_hmac(new_password)
+                conn.execute('UPDATE users SET password_hash = ?, salt = ? WHERE id = ?',
+                             (new_hash, new_salt, session['user_id']))
+                conn.commit()
+                conn.close()
+                return wrap_html(
+                    '<h2>הסיסמה שונתה בהצלחה!</h2><p style="text-align:center;"><a href="/system">חזרה למערכת</a></p>')
+        conn.close()
+
+    content = f'''
+        <h2>שינוי סיסמה (מאובטח)</h2>
+        {error}
+        <form method="post">
+            <input name="old_password" type="password" placeholder="סיסמה נוכחית" required>
+            <input name="new_password" type="password" placeholder="סיסמה חדשה (לפחות 10 תווים, אות גדולה וספרה)" required>
+            <button type="submit">שנה סיסמה</button>
+        </form>
+        <p style="text-align:center; margin-top:15px;"><a href="/system">ביטול</a></p>
+    '''
+    return wrap_html(content)
+
+
+@app.route('/forgot-password', methods=['GET', 'POST'])
+def forgot_password():
+    error = ""
+    if request.method == 'POST':
+        email = request.form['email']
+        random_val = secrets.token_hex(8)
+        sha1_token = hashlib.sha1(random_val.encode()).hexdigest()
+
+        conn = get_db_connection()
+        user = conn.execute('SELECT * FROM users WHERE email = ?', (email,)).fetchone()
+
+        if user:
+            conn.execute('UPDATE users SET reset_token = ? WHERE email = ?', (sha1_token, email))
+            conn.commit()
+            conn.close()
+
+            content = f'''
+                <h2>שחזור סיסמה</h2>
+                <p style="text-align:center;">טוקן השחזור שלך (SHA-1):</p>
+                <div style="background:rgba(255,255,255,0.1); padding:10px; text-align:center; border-radius:8px;"><code>{sha1_token}</code></div>
+                <form action="/verify-token" method="post" style="margin-top:20px;">
+                    <input type="hidden" name="email" value="{html.escape(email)}">
+                    <input name="token" placeholder="הזן את הטוקן שקיבלת" required>
+                    <button type="submit">אמת טוקן ושנה סיסמה</button>
+                </form>
+            '''
+            return wrap_html(content)
+        else:
+            error = '<div class="alert">האימייל לא נמצא במערכת.</div>'
+            conn.close()
+
+    content = f'''
+        <h2>שכחתי סיסמה (מאובטח)</h2>
+        {error}
+        <form method="post">
+            <input name="email" type="email" placeholder="הזן את כתובת האימייל שלך" required>
+            <button type="submit">שלח טוקן שחזור</button>
+        </form>
+        <p style="text-align:center; margin-top:15px;"><a href="/login">חזרה להתחברות</a></p>
+    '''
+    return wrap_html(content)
+
+
+@app.route('/verify-token', methods=['POST'])
+def verify_token():
+    email = request.form['email']
+    token = request.form['token']
+
+    conn = get_db_connection()
+    user = conn.execute('SELECT * FROM users WHERE email = ? AND reset_token = ?', (email, token)).fetchone()
+
+    if user:
+        conn.execute('UPDATE users SET reset_token = NULL WHERE id = ?', (user['id'],))
+        conn.commit()
+        conn.close()
+
+        session['user_id'] = user['id']
+        session['username'] = user['username']
+        return redirect(url_for('change_password'))
+    else:
+        conn.close()
+        return wrap_html(
+            '<div class="alert">טוקן שגוי.</div><p style="text-align:center;"><a href="/forgot-password">נסה שוב</a></p>')
 
 
 @app.route('/logout')
