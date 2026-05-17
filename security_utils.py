@@ -6,7 +6,7 @@ import re
 
 # Load security settings from the config file
 def load_config():
-    with open('config.json', 'r') as f:
+    with open('Vulnerable_Version/config.json', 'r') as f:
         return json.load(f)
 
 def validate_password_complexity(password):
