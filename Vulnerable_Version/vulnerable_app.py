@@ -252,16 +252,53 @@ def verify_token():
     token = request.form['token']
 
     conn = get_db_connection()
+    # VULNERABLE: SQL Injection
     query = f"SELECT * FROM users WHERE email = '{email}' AND reset_token = '{token}'"
     user = conn.execute(query).fetchone()
     conn.close()
 
     if user:
-        session['user_id'] = user['id']
-        session['username'] = user['username']
-        return redirect(url_for('change_password'))
+        # סשן זמני לאיפוס סיסמה
+        session['reset_user_id'] = user['id']
+        return redirect(url_for('reset_password'))
     else:
         return wrap_html('<p style="color:red">טוקן שגוי.</p><a href="/forgot-password">נסה שוב</a>')
+
+
+# --- המסך החדש: איפוס סיסמה ללא סיסמה נוכחית ---
+@app.route('/reset-password', methods=['GET', 'POST'])
+def reset_password():
+    if 'reset_user_id' not in session:
+        return redirect(url_for('login'))
+
+    error = ""
+    if request.method == 'POST':
+        new_password = request.form['new_password']
+        confirm_password = request.form['confirm_password']
+
+        if new_password != confirm_password:
+            error = '<p style="color:red">הסיסמאות אינן תואמות</p>'
+        else:
+            conn = get_db_connection()
+            # VULNERABLE: Direct string update without complexity checks
+            update_query = f"UPDATE users SET password = '{new_password}' WHERE id = {session['reset_user_id']}"
+            conn.execute(update_query)
+            conn.commit()
+            conn.close()
+
+            session.pop('reset_user_id', None)
+            return wrap_html('<h2>הסיסמה שוחזרה בהצלחה!</h2><a href="/login">מעבר להתחברות</a>')
+
+    content = f'''
+        <h2>הזנת סיסמה חדשה (גרסה פגיעה)</h2>
+        {error}
+        <form method="post">
+            <input name="new_password" type="password" placeholder="סיסמה חדשה" required>
+            <input name="confirm_password" type="password" placeholder="אימות סיסמה חדשה" required>
+            <button type="submit">שמור סיסמה</button>
+        </form>
+    '''
+    return wrap_html(content)
 
 
 @app.route('/logout')

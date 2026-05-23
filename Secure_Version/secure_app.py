@@ -336,18 +336,62 @@ def verify_token():
     user = conn.execute('SELECT * FROM users WHERE email = ? AND reset_token = ?', (email, token)).fetchone()
 
     if user:
+        # איפוס הטוקן לאחר שימוש מוצלח
         conn.execute('UPDATE users SET reset_token = NULL WHERE id = ?', (user['id'],))
         conn.commit()
         conn.close()
 
-        session['user_id'] = user['id']
-        session['username'] = user['username']
-        return redirect(url_for('change_password'))
+        # יצירת סשן זמני *רק* עבור איפוס הסיסמה (ולא התחברות מלאה למערכת)
+        session['reset_user_id'] = user['id']
+        return redirect(url_for('reset_password'))
     else:
         conn.close()
         return wrap_html(
             '<div class="alert">טוקן שגוי.</div><p style="text-align:center;"><a href="/forgot-password">נסה שוב</a></p>')
 
+
+# --- המסך החדש: איפוס סיסמה ללא סיסמה נוכחית ---
+@app.route('/reset-password', methods=['GET', 'POST'])
+def reset_password():
+    # מוודא שהמשתמש הגיע לכאן רק אחרי אימות טוקן מוצלח
+    if 'reset_user_id' not in session:
+        return redirect(url_for('login'))
+
+    error = ""
+    if request.method == 'POST':
+        new_password = request.form['new_password']
+        confirm_password = request.form['confirm_password']
+
+        if new_password != confirm_password:
+            error = '<div class="alert">הסיסמאות אינן תואמות.</div>'
+        else:
+            valid, msg = validate_password(new_password)
+            if not valid:
+                error = f'<div class="alert">{msg}</div>'
+            else:
+                new_hash, new_salt = hash_password_hmac(new_password)
+                conn = get_db_connection()
+                # SECURE: Parameterized Query
+                conn.execute('UPDATE users SET password_hash = ?, salt = ? WHERE id = ?',
+                             (new_hash, new_salt, session['reset_user_id']))
+                conn.commit()
+                conn.close()
+
+                # ניקוי סשן האיפוס והעברה למסך התחברות
+                session.pop('reset_user_id', None)
+                return wrap_html(
+                    '<h2>הסיסמה שוחזרה בהצלחה!</h2><p style="text-align:center;"><a href="/login">מעבר להתחברות</a></p>')
+
+    content = f'''
+        <h2>הזנת סיסמה חדשה (מאובטח)</h2>
+        {error}
+        <form method="post">
+            <input name="new_password" type="password" placeholder="סיסמה חדשה (לפחות 10 תווים, אות גדולה וספרה)" required>
+            <input name="confirm_password" type="password" placeholder="אימות סיסמה חדשה" required>
+            <button type="submit">שמור סיסמה</button>
+        </form>
+    '''
+    return wrap_html(content)
 
 @app.route('/logout')
 def logout():
