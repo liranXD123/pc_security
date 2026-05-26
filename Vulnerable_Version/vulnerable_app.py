@@ -7,7 +7,6 @@ app = Flask(__name__)
 app.secret_key = "vulnerable_secret_key_123"
 
 
-# --- Simple HTML Wrapper for Vulnerable Version ---
 def wrap_html(content):
     return f'''
     <!DOCTYPE html>
@@ -20,6 +19,7 @@ def wrap_html(content):
             .container {{ background: #2a2a35; padding: 40px; border-radius: 12px; text-align: right; width: 100%; max-width: 400px; box-sizing: border-box; }}
             input {{ width: 100%; padding: 10px; margin: 10px 0; border-radius: 6px; border: 1px solid #444; background: #111; color: #fff; box-sizing: border-box; text-align: right; }}
             button {{ width: 100%; padding: 10px; background: #e53e3e; color: white; border: none; border-radius: 6px; font-weight: bold; cursor: pointer; margin-top: 10px; }}
+            .btn-secondary {{ background: #444; }}
             a {{ color: #63b3ed; text-decoration: none; }}
             h2 {{ text-align: center; margin-bottom: 20px; }}
             p {{ text-align: center; }}
@@ -34,7 +34,6 @@ def wrap_html(content):
     '''
 
 
-# --- Database Setup (Vulnerable to SQLi) ---
 def get_db_connection():
     conn = sqlite3.connect('vulnerable_communication.db')
     conn.row_factory = sqlite3.Row
@@ -43,6 +42,7 @@ def get_db_connection():
 
 def init_db():
     conn = get_db_connection()
+    # החזרנו את עמודת reset_token
     conn.execute('''CREATE TABLE IF NOT EXISTS users 
                     (id INTEGER PRIMARY KEY, username TEXT, email TEXT, password TEXT, reset_token TEXT)''')
     conn.execute('''CREATE TABLE IF NOT EXISTS customers 
@@ -50,8 +50,6 @@ def init_db():
     conn.commit()
     conn.close()
 
-
-# --- Routes ---
 
 @app.route('/')
 def index():
@@ -122,19 +120,16 @@ def login():
 def system_screen():
     if 'user_id' not in session: return redirect(url_for('login'))
 
-    # פיצ'ר חסימה: אם הלקוח כבר הוסיף שם בסשן זה, הוא מועבר ישר למסך הסיכום
     if session.get('customer_added'):
         return redirect(url_for('success_screen'))
 
     conn = get_db_connection()
     if request.method == 'POST':
         cust_name = request.form['customer_name']
-        # VULNERABLE: SQL Injection
         conn.execute(f"INSERT INTO customers (name) VALUES ('{cust_name}')")
         conn.commit()
         conn.close()
 
-        # סימון בסשן שההוספה בוצעה ומעבר למסך הבחירה החדש
         session['customer_added'] = True
         return redirect(url_for('success_screen'))
 
@@ -152,13 +147,11 @@ def system_screen():
     return wrap_html(content)
 
 
-# --- מסך הבחירה החדש לאחר הוספה (גרסה פגיעה - מציג Stored XSS) ---
 @app.route('/success')
 def success_screen():
     if 'user_id' not in session: return redirect(url_for('login'))
 
     conn = get_db_connection()
-    # שליפת השורה האחרונה מהמסד כדי להציג את ה-Stored XSS בצורה פגיעה לחלוטין
     customer = conn.execute("SELECT * FROM customers ORDER BY id DESC LIMIT 1").fetchone()
     conn.close()
 
@@ -166,6 +159,7 @@ def success_screen():
 
     content = f'''
         <h2>הלקוח התווסף בהצלחה!</h2>
+        <p style="text-align:center; opacity:0.8;">הגעת למסך סיכום ההוספה. לא ניתן להוסיף לקוח בשם אחר בסשן הנוכחי.</p>
         <h3 style="color:#ef4444; text-align:center;">לקוח אחרון בבסיס הנתונים: {cust_name}</h3>
         <br>
         <div style="text-align:center;">
@@ -175,6 +169,7 @@ def success_screen():
     return wrap_html(content)
 
 
+# שינוי סיסמה (רק למחוברים)
 @app.route('/change-password', methods=['GET', 'POST'])
 def change_password():
     if 'user_id' not in session: return redirect(url_for('login'))
@@ -206,11 +201,12 @@ def change_password():
             <input name="new_password" type="password" placeholder="סיסמה חדשה" required>
             <button type="submit">שנה סיסמה</button>
         </form>
-        <a href="/system">ביטול</a>
+        <a href="/system">ביטול וחזרה למערכת</a>
     '''
     return wrap_html(content)
 
 
+# שכחתי סיסמה
 @app.route('/forgot-password', methods=['GET', 'POST'])
 def forgot_password():
     if request.method == 'POST':
@@ -252,20 +248,19 @@ def verify_token():
     token = request.form['token']
 
     conn = get_db_connection()
-    # VULNERABLE: SQL Injection
     query = f"SELECT * FROM users WHERE email = '{email}' AND reset_token = '{token}'"
     user = conn.execute(query).fetchone()
     conn.close()
 
     if user:
-        # סשן זמני לאיפוס סיסמה
+        # סשן זמני לאיפוס
         session['reset_user_id'] = user['id']
         return redirect(url_for('reset_password'))
     else:
         return wrap_html('<p style="color:red">טוקן שגוי.</p><a href="/forgot-password">נסה שוב</a>')
 
 
-# --- המסך החדש: איפוס סיסמה ללא סיסמה נוכחית ---
+# הזנת סיסמה חדשה (לאחר אימות טוקן)
 @app.route('/reset-password', methods=['GET', 'POST'])
 def reset_password():
     if 'reset_user_id' not in session:
@@ -280,8 +275,7 @@ def reset_password():
             error = '<p style="color:red">הסיסמאות אינן תואמות</p>'
         else:
             conn = get_db_connection()
-            # VULNERABLE: Direct string update without complexity checks
-            update_query = f"UPDATE users SET password = '{new_password}' WHERE id = {session['reset_user_id']}"
+            update_query = f"UPDATE users SET password = '{new_password}', reset_token = NULL WHERE id = {session['reset_user_id']}"
             conn.execute(update_query)
             conn.commit()
             conn.close()
@@ -290,7 +284,7 @@ def reset_password():
             return wrap_html('<h2>הסיסמה שוחזרה בהצלחה!</h2><a href="/login">מעבר להתחברות</a>')
 
     content = f'''
-        <h2>הזנת סיסמה חדשה (גרסה פגיעה)</h2>
+        <h2>הזנת סיסמה חדשה</h2>
         {error}
         <form method="post">
             <input name="new_password" type="password" placeholder="סיסמה חדשה" required>

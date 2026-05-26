@@ -12,13 +12,11 @@ app = Flask(__name__)
 app.secret_key = "super_secure_communication_ltd_2026"
 
 
-# --- טעינת קונפיגורציה ---
 def load_config():
     with open('config.json', 'r') as f:
         return json.load(f)
 
 
-# --- פונקציות אבטחה (HMAC, Salt, Complexity) ---
 def validate_password(password):
     config = load_config()
     if len(password) < config['min_length']:
@@ -42,7 +40,6 @@ def hash_password_hmac(password, salt=None):
     return pw_hash, salt
 
 
-# --- עטיפת HTML מודרנית (RTL) ---
 def wrap_html(content):
     return f'''
     <!DOCTYPE html>
@@ -56,7 +53,8 @@ def wrap_html(content):
             input {{ width: 100%; padding: 12px; margin: 10px 0; border-radius: 8px; border: 1px solid rgba(255, 255, 255, 0.2); background: rgba(0, 0, 0, 0.2); color: #fff; box-sizing: border-box; text-align: right; transition: 0.3s; }}
             input:focus {{ outline: none; border-color: #6366f1; }}
             button {{ width: 100%; padding: 12px; background: #6366f1; color: white; border: none; border-radius: 8px; font-weight: bold; cursor: pointer; margin-top: 10px; transition: 0.3s; }}
-            button:hover {{ background: #4f46e5; }}
+            .btn-secondary {{ background: #475569; }}
+            .btn-secondary:hover {{ background: #334155; }}
             a {{ color: #818cf8; text-decoration: none; font-size: 0.9rem; }}
             a:hover {{ text-decoration: underline; }}
             h2 {{ text-align: center; margin-bottom: 20px; color: #fff; }}
@@ -72,7 +70,6 @@ def wrap_html(content):
     '''
 
 
-# --- הגדרת מסד הנתונים ---
 def get_db_connection():
     conn = sqlite3.connect('secure_communication.db')
     conn.row_factory = sqlite3.Row
@@ -89,8 +86,6 @@ def init_db():
     conn.commit()
     conn.close()
 
-
-# --- ניתובים (Routes) ---
 
 @app.route('/')
 def index():
@@ -188,16 +183,15 @@ def system_screen():
     if 'user_id' not in session:
         return redirect(url_for('login'))
 
-    # פיצ'ר חסימה מאובטח: מונע לחלוטין הוספת לקוח נוסף ומעביר ישר לסיכום
     if session.get('customer_added'):
         return redirect(url_for('success_screen'))
 
     conn = get_db_connection()
     if request.method == 'POST':
         raw_cust_name = request.form['customer_name']
-        safe_cust_name = html.escape(raw_cust_name)  # SECURE: XSS Protection
+        safe_cust_name = html.escape(raw_cust_name)
 
-        conn.execute('INSERT INTO customers (name) VALUES (?)', (safe_cust_name,))  # SECURE: Parameterized Query
+        conn.execute('INSERT INTO customers (name) VALUES (?)', (safe_cust_name,))
         conn.commit()
         conn.close()
 
@@ -219,7 +213,6 @@ def system_screen():
     return wrap_html(content)
 
 
-# --- מסך הבחירה החדש לאחר הוספה (גרסה מאובטחת - מוגן מפני XSS) ---
 @app.route('/success')
 def success_screen():
     if 'user_id' not in session: return redirect(url_for('login'))
@@ -232,6 +225,7 @@ def success_screen():
 
     content = f'''
         <h2>הלקוח נרשם בהצלחה!</h2>
+        <p style="text-align:center; opacity:0.8;">הגעת למסך סיכום. על פי מדיניות האבטחה, לא ניתן להוסיף לקוח נוסף בסשן זה.</p>
         <div style="background:rgba(16,185,129,0.1); border:1px solid #10b981; padding:15px; border-radius:8px; text-align:center; margin:20px 0;">
             <span style="color:#10b981; font-weight:bold;">שם הלקוח הרשום (מאובטח): {cust_name}</span>
         </div>
@@ -242,6 +236,7 @@ def success_screen():
     return wrap_html(content)
 
 
+# שינוי סיסמה (רק למחוברים)
 @app.route('/change-password', methods=['GET', 'POST'])
 def change_password():
     if 'user_id' not in session: return redirect(url_for('login'))
@@ -279,11 +274,12 @@ def change_password():
             <input name="new_password" type="password" placeholder="סיסמה חדשה (לפחות 10 תווים, אות גדולה וספרה)" required>
             <button type="submit">שנה סיסמה</button>
         </form>
-        <p style="text-align:center; margin-top:15px;"><a href="/system">ביטול</a></p>
+        <p style="text-align:center; margin-top:15px;"><a href="/system">ביטול וחזרה למערכת</a></p>
     '''
     return wrap_html(content)
 
 
+# שכחתי סיסמה
 @app.route('/forgot-password', methods=['GET', 'POST'])
 def forgot_password():
     error = ""
@@ -336,12 +332,7 @@ def verify_token():
     user = conn.execute('SELECT * FROM users WHERE email = ? AND reset_token = ?', (email, token)).fetchone()
 
     if user:
-        # איפוס הטוקן לאחר שימוש מוצלח
-        conn.execute('UPDATE users SET reset_token = NULL WHERE id = ?', (user['id'],))
-        conn.commit()
-        conn.close()
-
-        # יצירת סשן זמני *רק* עבור איפוס הסיסמה (ולא התחברות מלאה למערכת)
+        # סשן זמני לאיפוס
         session['reset_user_id'] = user['id']
         return redirect(url_for('reset_password'))
     else:
@@ -350,10 +341,9 @@ def verify_token():
             '<div class="alert">טוקן שגוי.</div><p style="text-align:center;"><a href="/forgot-password">נסה שוב</a></p>')
 
 
-# --- המסך החדש: איפוס סיסמה ללא סיסמה נוכחית ---
+# הזנת סיסמה חדשה (לאחר אימות טוקן)
 @app.route('/reset-password', methods=['GET', 'POST'])
 def reset_password():
-    # מוודא שהמשתמש הגיע לכאן רק אחרי אימות טוקן מוצלח
     if 'reset_user_id' not in session:
         return redirect(url_for('login'))
 
@@ -371,13 +361,11 @@ def reset_password():
             else:
                 new_hash, new_salt = hash_password_hmac(new_password)
                 conn = get_db_connection()
-                # SECURE: Parameterized Query
-                conn.execute('UPDATE users SET password_hash = ?, salt = ? WHERE id = ?',
+                conn.execute('UPDATE users SET password_hash = ?, salt = ?, reset_token = NULL WHERE id = ?',
                              (new_hash, new_salt, session['reset_user_id']))
                 conn.commit()
                 conn.close()
 
-                # ניקוי סשן האיפוס והעברה למסך התחברות
                 session.pop('reset_user_id', None)
                 return wrap_html(
                     '<h2>הסיסמה שוחזרה בהצלחה!</h2><p style="text-align:center;"><a href="/login">מעבר להתחברות</a></p>')
@@ -392,6 +380,7 @@ def reset_password():
         </form>
     '''
     return wrap_html(content)
+
 
 @app.route('/logout')
 def logout():
