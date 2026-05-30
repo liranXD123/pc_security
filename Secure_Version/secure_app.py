@@ -23,8 +23,12 @@ def validate_password(password):
         return False, f"הסיסמה חייבת להכיל לפחות {config['min_length']} תווים."
     if config['require_complexity']['uppercase'] and not re.search(r"[A-Z]", password):
         return False, "הסיסמה חייבת להכיל לפחות אות גדולה אחת באנגלית."
+    if config['require_complexity']['lowercase'] and not re.search(r"[a-z]", password):
+        return False, "הסיסמה חייבת להכיל לפחות אות קטנה אחת באנגלית."
     if config['require_complexity']['digits'] and not re.search(r"\d", password):
         return False, "הסיסמה חייבת להכיל לפחות ספרה אחת."
+    if config['require_complexity']['special'] and not re.search(r"[!@#$%^&*(),.?\":{}|<>]", password):
+        return False, "הסיסמה חייבת להכיל לפחות תו מיוחד אחד."
     if any(word in password.lower() for word in config['forbidden_words']):
         return False, "הסיסמה מכילה מילה נפוצה או אסורה."
     return True, ""
@@ -80,7 +84,8 @@ def init_db():
     conn = get_db_connection()
     conn.execute('''CREATE TABLE IF NOT EXISTS users 
                     (id INTEGER PRIMARY KEY, username TEXT UNIQUE, email TEXT, 
-                     password_hash TEXT, salt TEXT, failed_attempts INTEGER DEFAULT 0, reset_token TEXT)''')
+                     password_hash TEXT, salt TEXT, failed_attempts INTEGER DEFAULT 0, reset_token TEXT,
+                     password_history TEXT DEFAULT '[]')''')
     conn.execute('''CREATE TABLE IF NOT EXISTS customers 
                     (id INTEGER PRIMARY KEY, name TEXT)''')
     conn.commit()
@@ -125,7 +130,7 @@ def register():
         <form method="post">
             <input name="username" value="{saved_username}" placeholder="שם משתמש" required>
             <input name="email" type="email" value="{saved_email}" placeholder="אימייל" required>
-            <input name="password" type="password" placeholder="סיסמה (לפחות 10 תווים, אות גדולה וספרה)" required>
+            <input name="password" type="password" placeholder="סיסמה" required>
             <button type="submit">הרשמה</button>
         </form>
         <p style="text-align:center; margin-top:15px;">כבר יש לך חשבון? <a href="/login">התחבר כאן</a></p>
@@ -257,13 +262,40 @@ def change_password():
             if not valid:
                 error = f'<div class="alert">{msg}</div>'
             else:
-                new_hash, new_salt = hash_password_hmac(new_password)
-                conn.execute('UPDATE users SET password_hash = ?, salt = ? WHERE id = ?',
-                             (new_hash, new_salt, session['user_id']))
-                conn.commit()
-                conn.close()
-                return wrap_html(
-                    '<h2>הסיסמה שונתה בהצלחה!</h2><p style="text-align:center;"><a href="/system">חזרה למערכת</a></p>')
+                history = json.loads(user['password_history']) if user['password_history'] else []
+                config = load_config()
+                
+                is_in_history = False
+                
+                # Check if new password matches the current one
+                new_hash_curr_salt, _ = hash_password_hmac(new_password, user['salt'])
+                if new_hash_curr_salt == user['password_hash']:
+                    is_in_history = True
+                
+                # Check if new password matches any in history
+                if not is_in_history:
+                    for past_hash, past_salt in history:
+                        check_hash, _ = hash_password_hmac(new_password, past_salt)
+                        if check_hash == past_hash:
+                            is_in_history = True
+                            break
+                            
+                if is_in_history:
+                    error = f'<div class="alert">לא ניתן להשתמש בסיסמאות קודמות (מוגבל ל-{config["password_history_limit"]}).</div>'
+                else:
+                    # Update history
+                    history.append([user['password_hash'], user['salt']])
+                    if len(history) > config['password_history_limit']:
+                        history.pop(0)
+                        
+                    new_hash, new_salt = hash_password_hmac(new_password)
+                    history_json = json.dumps(history)
+                    
+                    conn.execute('UPDATE users SET password_hash = ?, salt = ?, password_history = ? WHERE id = ?',
+                                 (new_hash, new_salt, history_json, session['user_id']))
+                    conn.commit()
+                    conn.close()
+                    return wrap_html('<h2>הסיסמה שונתה בהצלחה!</h2><p style="text-align:center;"><a href="/system">חזרה למערכת</a></p>')
         conn.close()
 
     content = f'''
@@ -271,7 +303,7 @@ def change_password():
         {error}
         <form method="post">
             <input name="old_password" type="password" placeholder="סיסמה נוכחית" required>
-            <input name="new_password" type="password" placeholder="סיסמה חדשה (לפחות 10 תווים, אות גדולה וספרה)" required>
+            <input name="new_password" type="password" placeholder="סיסמה חדשה" required>
             <button type="submit">שנה סיסמה</button>
         </form>
         <p style="text-align:center; margin-top:15px;"><a href="/system">ביטול וחזרה למערכת</a></p>
@@ -359,22 +391,52 @@ def reset_password():
             if not valid:
                 error = f'<div class="alert">{msg}</div>'
             else:
-                new_hash, new_salt = hash_password_hmac(new_password)
                 conn = get_db_connection()
-                conn.execute('UPDATE users SET password_hash = ?, salt = ?, reset_token = NULL WHERE id = ?',
-                             (new_hash, new_salt, session['reset_user_id']))
-                conn.commit()
-                conn.close()
+                user = conn.execute('SELECT * FROM users WHERE id = ?', (session['reset_user_id'],)).fetchone()
+                
+                history = json.loads(user['password_history']) if user['password_history'] else []
+                config = load_config()
+                
+                is_in_history = False
+                
+                # Check if new password matches the current one
+                new_hash_curr_salt, _ = hash_password_hmac(new_password, user['salt'])
+                if new_hash_curr_salt == user['password_hash']:
+                    is_in_history = True
+                
+                # Check if new password matches any in history
+                if not is_in_history:
+                    for past_hash, past_salt in history:
+                        check_hash, _ = hash_password_hmac(new_password, past_salt)
+                        if check_hash == past_hash:
+                            is_in_history = True
+                            break
+                            
+                if is_in_history:
+                    error = f'<div class="alert">לא ניתן להשתמש בסיסמאות קודמות (מוגבל ל-{config["password_history_limit"]}).</div>'
+                    conn.close()
+                else:
+                    # Update history
+                    history.append([user['password_hash'], user['salt']])
+                    if len(history) > config['password_history_limit']:
+                        history.pop(0)
+                        
+                    new_hash, new_salt = hash_password_hmac(new_password)
+                    history_json = json.dumps(history)
+                    
+                    conn.execute('UPDATE users SET password_hash = ?, salt = ?, reset_token = NULL, password_history = ? WHERE id = ?',
+                                 (new_hash, new_salt, history_json, session['reset_user_id']))
+                    conn.commit()
+                    conn.close()
 
-                session.pop('reset_user_id', None)
-                return wrap_html(
-                    '<h2>הסיסמה שוחזרה בהצלחה!</h2><p style="text-align:center;"><a href="/login">מעבר להתחברות</a></p>')
+                    session.pop('reset_user_id', None)
+                    return wrap_html('<h2>הסיסמה שוחזרה בהצלחה!</h2><p style="text-align:center;"><a href="/login">מעבר להתחברות</a></p>')
 
     content = f'''
         <h2>הזנת סיסמה חדשה (מאובטח)</h2>
         {error}
         <form method="post">
-            <input name="new_password" type="password" placeholder="סיסמה חדשה (לפחות 10 תווים, אות גדולה וספרה)" required>
+            <input name="new_password" type="password" placeholder="סיסמה חדשה" required>
             <input name="confirm_password" type="password" placeholder="אימות סיסמה חדשה" required>
             <button type="submit">שמור סיסמה</button>
         </form>
